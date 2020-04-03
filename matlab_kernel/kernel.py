@@ -88,6 +88,7 @@ class MatlabKernel(MetaKernel):
             "size": (560, 420),
             "format": "png",
             "resolution": 96,
+            "mode": "manual",
         }
         self._validated_plot_settings["size"] = tuple(
             self._matlab.get(0., "defaultfigureposition")[0][2:])
@@ -220,12 +221,17 @@ class MatlabKernel(MetaKernel):
         if resolution is not None:
             settings["resolution"] = resolution
 
+        mode = raw.get("mode")
+        if mode is not None:
+            settings["mode"] = mode
+
         backend = settings["backend"]
         width, height = settings["size"]
         resolution = settings["resolution"]
+        mode = settings["mode"]
         for k, v in {
                 "defaultfigurevisible": backends[backend],
-                "defaultfigurepaperpositionmode": "manual",
+                "defaultfigurepaperpositionmode": mode,
                 "defaultfigurepaperposition":
                     matlab.double([0, 0, width / resolution, height / resolution]),
                 "defaultfigurepaperunits": "inches"}.items():
