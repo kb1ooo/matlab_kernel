@@ -103,6 +103,8 @@ Development
 Install the package locally::
 
     $ pip install -e .
+    # add --sys-prefix to the end of the following command 
+    # to install in current virtual environment
     $ python -m matlab_kernel install
 
 As you make changes, test them in a notebook (restart the kernel between changes).

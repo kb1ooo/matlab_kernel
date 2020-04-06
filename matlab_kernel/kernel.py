@@ -27,12 +27,154 @@ except Exception:
     pipes = None
 
 from . import __version__
-
+from urllib.parse import urlparse, parse_qs, unquote
 
 class _PseudoStream:
-
     def __init__(self, writer):
         self.write = writer
+
+#  The following stream allows figure filenames to be pushed to the kernel from
+#  matlab via stdout.  The stream looks for start '\033[5i' and end '\033[4i'
+#  escape sequence delimiters in the stdout stream and if found, expects a URI
+#  of the form
+#
+#      fig://urlencoded_filename.png/gcf?id=12&rm=1
+#
+#  in between delimiters.  See comments on parse_uri method below for detail.
+#  An example matlab function that can be used to push a gcf to the kernel is
+#  given below
+#
+# ----- MATLAB FUNCTION jupFigRender.m
+# function jupFigRender(fig)
+#
+#    if nargin == 0
+#        fig = gcf;
+#    end
+#
+#    gcfid = num2str(get(fig,'Number'));
+#    dpi = 96;
+#    filename = [tempname '.png'];
+#    print(fig,'-dpng',sprintf('-r%i', dpi), filename);
+#    drawnow('update'); % flushes stdout buffer
+#    fprintf(1,'%s[5ifig://%s/gcf?id=%s&rm=1%s[4i',...
+#        27,urlencode(filename),gcfid,27)
+#    drawnow('update'); % flushes stdout buffer
+# end
+# ------
+
+
+class _PseudoStreamFig:
+    start = '\033[5i'
+    end = '\033[4i'
+
+    def __init__(self, writer, kern):
+        self.writer = writer
+        self.kern = kern
+        self.storedBuf = ""
+
+    # Parses URI and sends image file to display
+    # URI form: fig://urlencoded_filename.png/gcf?id=12&rm=1
+    #
+    # gcf id: Not used but there in case updating display supported
+    #         in future
+    # rm: 1 for remove file after rendering, 0 otherwise
+    #
+    # Todo:
+    # If metakernel supports the display and updateDisplay methods that allows
+    # for an ID, then it would be good to extend this to support
+    # display updates when the same gcf id is passed.  Here's what
+    # would be needed
+    # 1.  create a list to store them
+    # 2.  check if id is on list, if so, then call
+    #     update display instead of display
+    # 3.  otherwise, push onto list and call display
+    #     passing the id
+
+    def parse_uri(self, data):
+        u = urlparse(data)
+        filename = unquote(u.netloc)
+        # self.writer("filename: " + filename + "\n")
+        # self.writer("path: " + u.path + "\n")
+        if u.path == "/gcf":
+            gcf = parse_qs(u.query)
+            if "id" in gcf:
+                gcf_id = gcf["id"][0]
+                # self.writer("creating an image and calling display")
+                self.kern.Display(Image(filename=filename))
+                if "rm" in gcf and gcf["rm"][0] == "1":
+                    # self.writer("removing image file")
+                    os.remove(filename)
+
+    #  Look for start/end delim which delineate fig uri
+    #  1. Currently expects that **complete** start marker
+    #  appears in buffer (so caller should flush buffer before writing
+    #  segment).
+    #  2. However, it does currently support end marker that spans
+    #  multiple buffers.
+
+    def write(self, data):
+        start = _PseudoStreamFig.start
+        end = _PseudoStreamFig.end
+
+        data_to_print = ""
+        data_not_parsed = ""
+        # if there is data in the stored buf, then we found a beg marker
+        # in a previous buffer
+        if self.storedBuf:
+            #self.writer("some data in buffer: ")
+            #self.writer(self.storedBuf)
+            #self.writer("\n")
+            #self.writer("new data: ")
+            #self.writer(data)
+            #self.writer("\n")
+            self.storedBuf += data
+            found_end = self.storedBuf.find(end)
+            if found_end != -1:
+                self.parse_uri(self.storedBuf[:found_end])
+                data_not_parsed = self.storedBuf[found_end + len(end):]
+                self.storedBuf = ""
+        else:
+            found_start = data.find(start)
+            found_end = data.find(end)
+            # self.writer("found_start = " + str(found_start) +
+            #            " found_end = " + str(found_end) + "\n")
+
+            # found beg marker, not end marker
+            if found_start != -1 and found_end == -1:
+                #self.writer("GOT START BUT NOT END!\n")
+                #self.writer("current buf: ")
+                #self.writer(self.storedBuf)
+                #self.writer("\n")
+                #self.writer("current data: ")
+                #self.writer(data)
+                self.storedBuf += data[found_start + len(start):]
+                data_to_print = data[:found_start]
+            # found both markers
+            elif found_start != -1 and found_end != -1:
+                # self.writer("start end found\n")
+                self.parse_uri(data[found_start + len(start):found_end])
+                data_to_print = data[:found_start]
+                data_not_parsed = data[found_end + len(end):]
+            else:
+                data_to_print = data
+
+        # write data data
+        if data_to_print:
+            self.writer(data_to_print)
+
+        # if storedBuf gets too big then something likely went wrong, e.g. a
+        # terminating sequence was never sent.  Write storedBuf and break out
+        # of recursion
+        if len(self.storedBuf) > 1024:
+            if data_not_parsed:
+                self.writer(data_not_parsed)
+            self.writer(self.storedBuf)
+            self.storedBuf = ""
+            return
+
+        # recurse on data that hasn't been parsed
+        if data_not_parsed:
+            self.write(data_not_parsed)
 
 
 def get_kernel_json():
@@ -194,7 +336,7 @@ class MatlabKernel(MetaKernel):
         raw = self.plot_settings
         settings = self._validated_plot_settings
 
-        backends = {"inline": "off", "native": "on"}
+        backends = {"inline": "off", "native": "on", "async": "off"}
         backend = raw.get("backend")
         if backend is not None:
             if backend not in backends:
@@ -257,7 +399,8 @@ class MatlabKernel(MetaKernel):
 
     def _execute_async(self, code):
         try:
-            with pipes(stdout=_PseudoStream(partial(self.Print, end="")),
+            with pipes(
+                stdout=_PseudoStreamFig(partial(self.Print, end=""), self),
                 stderr=_PseudoStream(partial(self.Error, end=""))):
                 kwargs = { 'nargout': 0, 'async': True }
                 future = self._matlab.eval(code, **kwargs)
