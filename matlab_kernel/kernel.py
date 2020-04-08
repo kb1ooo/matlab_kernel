@@ -376,7 +376,8 @@ class MatlabKernel(MetaKernel):
                 "defaultfigurepaperpositionmode": mode,
                 "defaultfigurepaperposition":
                     matlab.double([0, 0, width / resolution, height / resolution]),
-                "defaultfigurepaperunits": "inches"}.items():
+                "defaultfigurepaperunits": "inches",
+                "UserData": "jupyter"}.items():
             self._matlab.set(0., k, v, nargout=0)
 
     def repr(self, obj):
